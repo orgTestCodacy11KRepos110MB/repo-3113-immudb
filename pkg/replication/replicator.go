@@ -64,6 +64,9 @@ type TxReplicator struct {
 
 	streamSrvFactory stream.ServiceFactory
 
+	exportTxStream         schema.ImmuService_StreamExportTxClient
+	exportTxStreamReceiver stream.MsgReceiver
+
 	lastTx uint64
 
 	prefetchTxBuffer       chan prefetchTxEntry // buffered channel of exported txs
@@ -270,6 +273,13 @@ func (txr *TxReplicator) connect() error {
 		txr.opts.primaryPort,
 		txr.db.GetName())
 
+	txr.exportTxStream, err = txr.client.StreamExportTx(txr.context)
+	if err != nil {
+		return err
+	}
+
+	txr.exportTxStreamReceiver = txr.streamSrvFactory.NewMsgReceiver(txr.exportTxStream)
+
 	return nil
 }
 
@@ -279,6 +289,10 @@ func (txr *TxReplicator) disconnect() {
 	}
 
 	txr.logger.Infof("Disconnecting from '%s':'%d' for database '%s'...", txr.opts.primaryHost, txr.opts.primaryPort, txr.db.GetName())
+
+	if txr.exportTxStream != nil {
+		txr.exportTxStream.CloseSend()
+	}
 
 	txr.client.CloseSession(txr.context)
 
@@ -327,18 +341,16 @@ func (txr *TxReplicator) fetchNextTx() error {
 		}
 	}
 
-	exportTxStream, err := txr.client.ExportTx(txr.context, &schema.ExportTxRequest{
+	req := &schema.ExportTxRequest{
 		Tx:                 nextTx,
 		ReplicaState:       state,
 		AllowPreCommitted:  syncReplicationEnabled,
 		SkipIntegrityCheck: true,
-	})
-	if err != nil {
-		return err
 	}
 
-	receiver := txr.streamSrvFactory.NewMsgReceiver(exportTxStream)
-	etx, err := receiver.ReadFully()
+	txr.exportTxStream.Send(req)
+
+	etx, err := txr.exportTxStreamReceiver.ReadFully()
 
 	if err != nil && !errors.Is(err, io.EOF) {
 		if strings.Contains(err.Error(), "commit state diverged from") {
@@ -371,7 +383,7 @@ func (txr *TxReplicator) fetchNextTx() error {
 	}
 
 	if syncReplicationEnabled {
-		md := exportTxStream.Trailer()
+		md := txr.exportTxStream.Trailer()
 
 		if len(md.Get("may-commit-up-to-txid-bin")) == 0 ||
 			len(md.Get("may-commit-up-to-alh-bin")) == 0 ||

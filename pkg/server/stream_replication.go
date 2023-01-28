@@ -19,6 +19,7 @@ package server
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 
 	"github.com/codenotary/immudb/pkg/api/schema"
 	"google.golang.org/grpc/metadata"
@@ -102,4 +103,21 @@ func (s *ImmuServer) ReplicateTx(replicateTxServer schema.ImmuService_ReplicateT
 	}
 
 	return replicateTxServer.SendAndClose(md)
+}
+
+func (s *ImmuServer) StreamExportTx(stream schema.ImmuService_StreamExportTxServer) error {
+	for {
+		req, err := stream.Recv()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		err = s.ExportTx(req, stream)
+		if err != nil {
+			return err
+		}
+	}
 }
